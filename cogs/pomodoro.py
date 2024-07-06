@@ -2,7 +2,7 @@
 
 # Version: 6.1.0
 
-# Modified by Y.Ozaki - https://github.com/z4kkyy
+# Modified by z4kky - https://github.com/z4kkyy
 
 import asyncio
 import os
