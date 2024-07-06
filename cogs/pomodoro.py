@@ -10,7 +10,7 @@ import math
 import os
 import subprocess
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import discord
 from discord.ext import commands
@@ -35,6 +35,8 @@ class Pomodoro(commands.Cog, name="pomodoro"):
         # Pomodoro timer management
         self.server_to_pomodoro_timer = defaultdict(lambda: None)  # type: dict[int, tuple[datetime, int, str]]
         self.server_to_pomodoro_status = defaultdict(lambda: False)
+        self.server_to_total_elapsed_time = defaultdict(lambda: timedelta)
+        self.server_to_last_start_time = defaultdict(lambda: None)
 
         # Default Pomodoro settings
         self.server_to_pomodoro_work_time = defaultdict(lambda: 25)
@@ -47,21 +49,32 @@ class Pomodoro(commands.Cog, name="pomodoro"):
 
         self.audio_path = f"{os.path.realpath(os.path.dirname(__file__))}/audio.mp3"
 
-    def format_time(self, minutes: float) -> str:
+    def format_time(self, td: timedelta) -> str:
         """
         Convert minutes to mm:ss format.
 
         :param minutes: Time in minutes (can be float)
         :return: Formatted time string in mm:ss format
         """
-        total_seconds = math.floor(minutes * 60)
-        minutes, seconds = divmod(total_seconds, 60)
-        return f"{minutes:02d}:{seconds:02d}"
+        total_seconds = int(td.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes:02d}:{seconds:02d}"
 
     async def pomodoro_loop(self):
         while True:
             for guild_id, status in self.server_to_pomodoro_status.items():
                 if status:
+
+                    now = datetime.now()
+                    last_start_time = self.server_to_last_start_time[guild_id]
+                    if last_start_time:
+                        self.server_to_total_elapsed_time[guild_id] += now - last_start_time
+                        self.server_to_last_start_time[guild_id] = now
+
                     timer_data = self.server_to_pomodoro_timer[guild_id]
                     if timer_data:
                         start_time, pomodoro_count, current_phase = timer_data
@@ -95,8 +108,8 @@ class Pomodoro(commands.Cog, name="pomodoro"):
         self.server_to_pomodoro_timer[guild_id] = (datetime.now(), pomodoro_count, "break")
 
         channel = self.server_to_text_channel[guild_id]
-        break_time_formatted = self.format_time(break_time)
-        await channel.send(f"作業セッション完了！{break_type}の時間です（{break_time_formatted}）")
+        break_time_formatted = self.format_time(timedelta(minutes=break_time))
+        await channel.send(f"作業セッション完了！{break_type}の時間です({break_time_formatted})")
 
         await self.play_sound(guild_id, self.audio_path)
 
@@ -108,8 +121,8 @@ class Pomodoro(commands.Cog, name="pomodoro"):
 
         channel = self.server_to_text_channel[guild_id]
         work_time = self.server_to_pomodoro_work_time[guild_id]
-        work_time_formatted = self.format_time(work_time)
-        await channel.send(f"休憩時間終了！作業に戻りましょう！（{work_time_formatted}）")
+        work_time_formatted = self.format_time(timedelta(minutes=work_time))
+        await channel.send(f"休憩時間終了！作業に戻りましょう！({work_time_formatted})")
 
         await self.play_sound(guild_id, self.audio_path)
 
@@ -137,7 +150,7 @@ class Pomodoro(commands.Cog, name="pomodoro"):
         guild_id = context.guild.id
 
         if self.server_to_voice_client[guild_id] is None or not self.server_to_voice_client[guild_id].is_connected():
-            join_success = await self.__join(context)
+            join_success = await self._join(context)
             if not join_success:
                 embed = discord.Embed(
                     description="このコマンドを使用するには、ボイスチャンネルに参加している必要があります。", color=0xE02B2B
@@ -154,9 +167,12 @@ class Pomodoro(commands.Cog, name="pomodoro"):
 
         self.server_to_pomodoro_status[guild_id] = True
         self.server_to_pomodoro_timer[guild_id] = (datetime.now(), 0, "work")
-        self.server_to_pomodoro_count[guild_id] = 0  # ポモドーロカウントをリセット
+        self.server_to_pomodoro_count[guild_id] = 0
+        self.server_to_total_elapsed_time[guild_id] = timedelta(seconds=2)
+        self.server_to_last_start_time[guild_id] = datetime.now()
 
-        work_time_formatted = self.format_time(self.server_to_pomodoro_work_time[guild_id])
+        work_time = self.server_to_pomodoro_work_time[guild_id]
+        work_time_formatted = self.format_time(timedelta(minutes=work_time))
         embed = discord.Embed(
             description=f"ポモドーロタイマーを開始しました。作業時間: {work_time_formatted}", color=0x00FF00
         )
@@ -176,26 +192,30 @@ class Pomodoro(commands.Cog, name="pomodoro"):
             await context.reply(embed=embed)
             return
 
-        pomodoro_timer = self.server_to_pomodoro_timer[guild_id]
         self.server_to_pomodoro_status[guild_id] = False
 
-        if pomodoro_timer:
-            start_time, pomodoro_count, _ = pomodoro_timer
-            elapsed_time = datetime.now() - start_time
-            elapsed_time_str = self.format_time(elapsed_time.total_seconds() / 60)
+        # 最後の経過時間を加算
+        now = datetime.now()
+        last_start = self.server_to_last_start_time[guild_id]
+        if last_start:
+            elapsed = now - last_start
+            self.server_to_total_elapsed_time[guild_id] += elapsed
 
-            embed = discord.Embed(
-                description=f"ポモドーロセッションが終了しました。\n合計時間: {elapsed_time_str}\n完了したポモドーロ: {pomodoro_count}", color=0x00FF00
-            )
-        else:
-            embed = discord.Embed(
-                description="ポモドーロセッションが終了しました。詳細な情報は利用できません。", color=0x00FF00
-            )
+        total_time = self.server_to_total_elapsed_time[guild_id]
+        pomodoro_count = self.server_to_pomodoro_count[guild_id]
+
+        elapsed_time_str = self.format_time(total_time)
+
+        embed = discord.Embed(
+            description=f"ポモドーロセッションが終了しました。\n合計時間: {elapsed_time_str}\n完了したポモドーロ: {pomodoro_count}", color=0x00FF00
+        )
 
         await context.reply(embed=embed)
 
         self.server_to_pomodoro_count[guild_id] = 0
         self.server_to_pomodoro_timer[guild_id] = None
+        self.server_to_total_elapsed_time[guild_id] = timedelta()
+        self.server_to_last_start_time[guild_id] = None
 
     @commands.hybrid_command(
         name="pomostatus",
@@ -227,13 +247,16 @@ class Pomodoro(commands.Cog, name="pomodoro"):
                 time_left = break_time - elapsed_time
                 phase_name = "休憩"
 
-            time_left_formatted = self.format_time(time_left)
+            time_left_formatted = self.format_time(timedelta(minutes=time_left))
+            total_elapsed_time = self.server_to_total_elapsed_time[guild_id]
+            total_elapsed_time_formatted = self.format_time(total_elapsed_time)
 
             embed = discord.Embed(
                 title="現在の状況",
                 description=f"現在のフェーズ: {phase_name}\n"
                             f"残り時間: {time_left_formatted}\n"
-                            f"完了済みポモドーロ: {pomodoro_count}",
+                            f"完了済みポモドーロ: {pomodoro_count}\n"
+                            f"合計経過時間: {total_elapsed_time_formatted}",
                 color=0x00FF00
             )
             await context.reply(embed=embed)
@@ -275,9 +298,9 @@ class Pomodoro(commands.Cog, name="pomodoro"):
         self.server_to_pomodoro_long_break_time[guild_id] = long_break_time
         self.server_to_pomodoro_long_break_interval[guild_id] = long_break_interval
 
-        settings = f"作業時間: {self.format_time(work_time)}\n" \
-                   f"休憩(短): {self.format_time(short_break_time)}\n" \
-                   f"休憩(長): {self.format_time(long_break_time)}\n" \
+        settings = f"作業時間: {self.format_time(timedelta(minutes=work_time))}\n" \
+                   f"休憩(短): {self.format_time(timedelta(minutes=short_break_time))}\n" \
+                   f"休憩(長): {self.format_time(timedelta(minutes=long_break_time))}\n" \
                    f"長休憩までの間隔: {long_break_interval} ポモドーロ"
 
         embed = discord.Embed(
@@ -287,7 +310,7 @@ class Pomodoro(commands.Cog, name="pomodoro"):
         )
         await context.reply(embed=embed)
 
-    async def __join(self, context: Context) -> bool:
+    async def _join(self, context: Context) -> bool:
         user = context.author
 
         if user.voice is None:
@@ -335,15 +358,15 @@ class Pomodoro(commands.Cog, name="pomodoro"):
             guild_id = member.guild.id
             if before.channel is not None and after.channel is None:
                 if self.server_to_expected_disconnection[guild_id]:
-                    self.bot.logger.info("通常の切断を検出しました。")
+                    self.bot.logger.info(f"Detected normal disconnection. (guild id: {guild_id})")
                     self.server_to_expected_disconnection[guild_id] = False
                 else:
-                    self.bot.logger.info("予期せぬ切断を検出しました。再接続を試みます。")
+                    self.bot.logger.info(f"Detected unexpected disconnection. (guild id: {guild_id})")
                     try:
                         self.server_to_voice_client[guild_id] = await before.channel.connect()
-                        self.bot.logger.info("ボイスチャンネルに正常に再接続しました。")
+                        self.bot.logger.info("Reconnected to the voice channel.")
                     except Exception as e:
-                        self.bot.logger.error(f"ボイスチャンネルへの再接続に失敗しました: {str(e)}")
+                        self.bot.logger.error(f"Failed to reconnect to the voice channel: {str(e)}")
 
 
 async def setup(bot) -> None:
