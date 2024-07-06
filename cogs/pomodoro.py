@@ -2,11 +2,9 @@
 
 # Version: 6.1.0
 
-# Modified by Y.Ozaki - https://github.com/mttk1528
-
+# Modified by Y.Ozaki - https://github.com/z4kkyy
 
 import asyncio
-import math
 import os
 import subprocess
 from collections import defaultdict
